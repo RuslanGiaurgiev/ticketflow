@@ -109,9 +109,6 @@ flowchart LR
 
 | Участник | Сервисы |
 |---|---|
-| 1 | Order Service (сага) + API Gateway |
-| 2 | Inventory Service + Catalog Service |
-| 3 | Payment Service + заглушка платёжного провайдера |
-| 4 | Ticketing Service + Notification Service |
-
-Если в команде трое — участник 3 забирает ещё и Notification.
+| Гяургиев Руслан | Order Service (сага) + API Gateway |
+| Коромыслова Диана | Inventory Service + Catalog Service |
+| Лиджанов Альберт | Payment Service + заглушка платёжного провайдера |
