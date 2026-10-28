@@ -1,0 +1,184 @@
+openapi: 3.0.3
+info:
+  title: TicketFlow Inventory Service API
+  version: 1.0.0
+  description: |
+    Состояние мест и холды.
+    - `GET /events/{eventId}/availability` — публичный, через Gateway.
+    - `/holds` — внутренний, вызывает только Order Service (mTLS в сети кластера).
+
+    Подтверждение и освобождение холда идут асинхронно командами
+    `ConfirmHold` / `ReleaseHold` (см. AsyncAPI), а не через REST.
+servers:
+  - url: http://inventory-service:8080/v1
+security:
+  - serviceAuth: []
+paths:
+  /events/{eventId}/availability:
+    get:
+      operationId: getAvailability
+      security: []
+      summary: Доступность мест на мероприятие
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Статусы мест. HELD и SOLD для клиента выглядят одинаково — «занято»
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [eventId, seats]
+                properties:
+                  eventId:
+                    type: string
+                    format: uuid
+                  seats:
+                    type: array
+                    items:
+                      type: object
+                      required: [seatId, available]
+                      properties:
+                        seatId:
+                          type: string
+                        available:
+                          type: boolean
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /holds:
+    post:
+      operationId: createHold
+      summary: Захолдить места за заказом (внутренний)
+      description: |
+        Атомарно: либо все места переходят AVAILABLE → HELD, либо ни одно.
+        Идемпотентно по `orderId`: повторный вызов для того же заказа
+        возвращает уже существующий холд.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateHoldRequest'
+      responses:
+        '201':
+          description: Холд создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+        '200':
+          description: Холд для этого orderId уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+        '409':
+          description: Часть мест недоступна, ничего не захолжено
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, unavailableSeatIds]
+                properties:
+                  code:
+                    type: string
+                    example: SEATS_UNAVAILABLE
+                  unavailableSeatIds:
+                    type: array
+                    items:
+                      type: string
+  /holds/{holdId}:
+    get:
+      operationId: getHold
+      summary: Получить холд (внутренний, для отладки и сверки)
+      parameters:
+        - name: holdId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Холд
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    serviceAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Сервисный токен (client credentials), выдаётся каждому сервису
+  responses:
+    NotFound:
+      description: Не найдено
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: string
+              message:
+                type: string
+  schemas:
+    CreateHoldRequest:
+      type: object
+      required: [orderId, eventId, seatIds]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        eventId:
+          type: string
+          format: uuid
+        seatIds:
+          type: array
+          minItems: 1
+          maxItems: 6
+          uniqueItems: true
+          items:
+            type: string
+    Hold:
+      type: object
+      required: [id, orderId, eventId, seatIds, status, expiresAt, amount]
+      properties:
+        id:
+          type: string
+          format: uuid
+        orderId:
+          type: string
+          format: uuid
+        eventId:
+          type: string
+          format: uuid
+        seatIds:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [ACTIVE, CONFIRMED, RELEASED, EXPIRED]
+        expiresAt:
+          type: string
+          format: date-time
+          description: Обычно now + 15 минут
+        amount:
+          type: object
+          description: Сумма по ценам мест, зафиксированным при холде
+          required: [amount, currency]
+          properties:
+            amount:
+              type: integer
+            currency:
+              type: string

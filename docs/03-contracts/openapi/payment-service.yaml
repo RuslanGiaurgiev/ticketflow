@@ -1,0 +1,180 @@
+openapi: 3.0.3
+info:
+  title: TicketFlow Payment Service API
+  version: 1.0.0
+  description: |
+    Платежи через внешнего провайдера.
+    - `POST /payments` — внутренний, вызывает Order Service.
+    - `POST /webhooks/psp` — вызывает платёжный провайдер (через Gateway).
+
+    Возврат — асинхронной командой `RefundPayment` (см. AsyncAPI).
+servers:
+  - url: http://payment-service:8080/v1
+security:
+  - serviceAuth: []
+paths:
+  /payments:
+    post:
+      operationId: createPayment
+      summary: Создать платёж у провайдера (внутренний)
+      description: |
+        Идемпотентно по `orderId`: один заказ — один платёж.
+        Тот же ключ передаётся провайдеру как его Idempotence-Key,
+        поэтому повтор после таймаута не создаст второй платёж и там.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+      responses:
+        '201':
+          description: Платёж создан, у него есть ссылка на оплату
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '200':
+          description: Платёж для этого orderId уже был создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '502':
+          description: Провайдер ответил ошибкой
+        '504':
+          description: Провайдер не ответил вовремя. Вызов можно безопасно повторить
+  /payments/{paymentId}:
+    get:
+      operationId: getPayment
+      summary: Получить платёж
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Платёж
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '404':
+          description: Не найдено
+  /webhooks/psp:
+    post:
+      operationId: handleProviderWebhook
+      summary: Вебхук от платёжного провайдера
+      description: |
+        1. Проверяем подпись (HMAC в заголовке `X-Signature`), иначе 401.
+        2. Пишем в `provider_webhook_log` с уникальным `providerEventId`.
+           Дубль — сразу 200, ничего не делаем.
+        3. Сверяем статус запросом к API провайдера (не верим телу на слово).
+        4. В одной транзакции: обновляем `payments` + пишем событие в outbox.
+        5. Отвечаем 200. Любой не-2xx — провайдер повторит позже.
+      security: []
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderWebhook'
+      responses:
+        '200':
+          description: Принято (в том числе дубль)
+        '401':
+          description: Неверная подпись
+components:
+  securitySchemes:
+    serviceAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Сервисный токен (client credentials), выдаётся каждому сервису
+  schemas:
+    CreatePaymentRequest:
+      type: object
+      required: [orderId, amount, returnUrl, expiresAt]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        amount:
+          $ref: '#/components/schemas/Money'
+        description:
+          type: string
+          example: "2 билета, Концерт X, 12.12.2026"
+        returnUrl:
+          type: string
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            Срок жизни платёжной сессии. Ставится на 3 минуты раньше
+            окончания холда, чтобы оплата не прошла после истечения холда.
+    Payment:
+      type: object
+      required: [id, orderId, amount, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        orderId:
+          type: string
+          format: uuid
+        providerPaymentId:
+          type: string
+        amount:
+          $ref: '#/components/schemas/Money'
+        status:
+          type: string
+          enum: [CREATED, SUCCEEDED, FAILED, REFUND_PENDING, REFUNDED]
+        confirmationUrl:
+          type: string
+          format: uri
+        createdAt:
+          type: string
+          format: date-time
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          description: В копейках
+        currency:
+          type: string
+          example: RUB
+    ProviderWebhook:
+      type: object
+      description: Формат провайдера, наружу из Payment Service не выходит (ACL)
+      required: [eventId, type, object]
+      properties:
+        eventId:
+          type: string
+          description: Уникальный id события у провайдера, по нему отсекаем дубли
+        type:
+          type: string
+          enum: [payment.succeeded, payment.canceled, refund.succeeded]
+        object:
+          type: object
+          properties:
+            id:
+              type: string
+            status:
+              type: string
+            metadata:
+              type: object
+              properties:
+                orderId:
+                  type: string

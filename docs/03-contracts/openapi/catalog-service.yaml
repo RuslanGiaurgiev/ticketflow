@@ -1,0 +1,173 @@
+openapi: 3.0.3
+info:
+  title: TicketFlow Catalog Service API
+  version: 1.0.0
+  description: Афиша, площадки и схемы залов. Чтение публичное, запись — для организатора.
+servers:
+  - url: https://api.ticketflow.local/catalog/v1
+paths:
+  /events:
+    get:
+      operationId: listEvents
+      security: []
+      summary: Афиша
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: city
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Список мероприятий
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EventSummary'
+    post:
+      operationId: createEvent
+      summary: Создать мероприятие (организатор)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEventRequest'
+      responses:
+        '201':
+          description: Создано в статусе DRAFT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+  /events/{eventId}:
+    get:
+      operationId: getEvent
+      security: []
+      summary: Мероприятие со схемой зала и ценами
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      responses:
+        '200':
+          description: Мероприятие
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '404':
+          description: Не найдено
+  /events/{eventId}/publish:
+    post:
+      operationId: publishEvent
+      summary: Открыть продажи (организатор)
+      description: |
+        Переводит DRAFT → ON_SALE и публикует событие `EventPublished`
+        (через outbox). По нему Inventory создаёт места.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      responses:
+        '202':
+          description: Публикация принята
+        '409':
+          description: Уже опубликовано
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    EventId:
+      name: eventId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    EventSummary:
+      type: object
+      required: [id, title, startsAt, venueName, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+        venueName:
+          type: string
+        minPrice:
+          type: integer
+        status:
+          type: string
+          enum: [DRAFT, ON_SALE, SOLD_OUT, FINISHED]
+    Event:
+      allOf:
+        - $ref: '#/components/schemas/EventSummary'
+        - type: object
+          properties:
+            description:
+              type: string
+            venueId:
+              type: string
+              format: uuid
+            seats:
+              type: array
+              items:
+                $ref: '#/components/schemas/SeatDefinition'
+    SeatDefinition:
+      type: object
+      required: [seatId, sector, row, number, priceCategory, price]
+      properties:
+        seatId:
+          type: string
+          example: A-12-07
+        sector:
+          type: string
+        row:
+          type: integer
+        number:
+          type: integer
+        priceCategory:
+          type: string
+        price:
+          type: integer
+          description: В копейках
+    CreateEventRequest:
+      type: object
+      required: [title, startsAt, venueId, prices]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+        venueId:
+          type: string
+          format: uuid
+        prices:
+          type: object
+          description: Цена по ценовой категории, в копейках
+          additionalProperties:
+            type: integer

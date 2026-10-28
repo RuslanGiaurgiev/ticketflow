@@ -1,0 +1,655 @@
+asyncapi: 3.0.0
+info:
+  title: TicketFlow — события и команды
+  version: 1.0.0
+  description: |
+    Все асинхронные сообщения системы. Брокер — Kafka.
+
+    **Соглашения**
+    - Ключ сообщения Kafka = `orderId` (для `catalog.events` — `eventId`).
+      Все сообщения одного заказа попадают в одну партицию и читаются по порядку.
+    - Доставка at-least-once. Продюсеры пишут через Transactional Outbox,
+      консьюмеры отсеивают дубли по `messageId` через таблицу inbox (см. ADR-003).
+    - **Команда** (`*.commands`) — «сделай»: один адресат, отправитель ждёт ответное событие.
+    - **Событие** (`*.events`) — «произошло»: адресатов может быть сколько угодно.
+    - Обратная совместимость: поля только добавляются. Ломающее изменение —
+      новый `schemaVersion` и новый тип сообщения.
+servers:
+  kafka:
+    host: kafka:9092
+    protocol: kafka
+    description: Кластер из 3 брокеров, replication.factor=3, min.insync.replicas=2
+
+channels:
+  catalogEvents:
+    address: catalog.events
+    description: События каталога
+    messages:
+      EventPublished:
+        $ref: '#/components/messages/EventPublished'
+
+  inventoryCommands:
+    address: inventory.commands
+    description: Команды Order → Inventory
+    messages:
+      ConfirmHold:
+        $ref: '#/components/messages/ConfirmHold'
+      ReleaseHold:
+        $ref: '#/components/messages/ReleaseHold'
+
+  inventoryEvents:
+    address: inventory.events
+    description: События Inventory
+    messages:
+      HoldConfirmed:
+        $ref: '#/components/messages/HoldConfirmed'
+      HoldConfirmFailed:
+        $ref: '#/components/messages/HoldConfirmFailed'
+      HoldReleased:
+        $ref: '#/components/messages/HoldReleased'
+      HoldExpired:
+        $ref: '#/components/messages/HoldExpired'
+
+  paymentCommands:
+    address: payment.commands
+    description: Команды Order → Payment
+    messages:
+      RefundPayment:
+        $ref: '#/components/messages/RefundPayment'
+
+  paymentEvents:
+    address: payment.events
+    description: События Payment
+    messages:
+      PaymentSucceeded:
+        $ref: '#/components/messages/PaymentSucceeded'
+      PaymentFailed:
+        $ref: '#/components/messages/PaymentFailed'
+      PaymentRefunded:
+        $ref: '#/components/messages/PaymentRefunded'
+
+  ticketingCommands:
+    address: ticketing.commands
+    description: Команды Order → Ticketing
+    messages:
+      IssueTickets:
+        $ref: '#/components/messages/IssueTickets'
+
+  ticketingEvents:
+    address: ticketing.events
+    description: События Ticketing
+    messages:
+      TicketsIssued:
+        $ref: '#/components/messages/TicketsIssued'
+
+  orderEvents:
+    address: order.events
+    description: Итоговые события заказа
+    messages:
+      OrderCompleted:
+        $ref: '#/components/messages/OrderCompleted'
+      OrderCancelled:
+        $ref: '#/components/messages/OrderCancelled'
+
+operations:
+  # ---------- Catalog ----------
+  catalogPublishesEvents:
+    action: send
+    summary: Catalog публикует открытие продаж
+    channel:
+      $ref: '#/channels/catalogEvents'
+    messages:
+      - $ref: '#/channels/catalogEvents/messages/EventPublished'
+  inventoryConsumesCatalog:
+    action: receive
+    summary: Inventory создаёт места мероприятия со статусом AVAILABLE
+    channel:
+      $ref: '#/channels/catalogEvents'
+    messages:
+      - $ref: '#/channels/catalogEvents/messages/EventPublished'
+
+  # ---------- Inventory ----------
+  orderSendsInventoryCommands:
+    action: send
+    summary: Order (оркестратор) подтверждает или освобождает холд
+    channel:
+      $ref: '#/channels/inventoryCommands'
+    messages:
+      - $ref: '#/channels/inventoryCommands/messages/ConfirmHold'
+      - $ref: '#/channels/inventoryCommands/messages/ReleaseHold'
+  inventoryHandlesCommands:
+    action: receive
+    summary: Inventory выполняет команды над холдами
+    channel:
+      $ref: '#/channels/inventoryCommands'
+    messages:
+      - $ref: '#/channels/inventoryCommands/messages/ConfirmHold'
+      - $ref: '#/channels/inventoryCommands/messages/ReleaseHold'
+  inventoryPublishesEvents:
+    action: send
+    summary: Inventory сообщает результат команд и истечение холдов
+    channel:
+      $ref: '#/channels/inventoryEvents'
+    messages:
+      - $ref: '#/channels/inventoryEvents/messages/HoldConfirmed'
+      - $ref: '#/channels/inventoryEvents/messages/HoldConfirmFailed'
+      - $ref: '#/channels/inventoryEvents/messages/HoldReleased'
+      - $ref: '#/channels/inventoryEvents/messages/HoldExpired'
+  orderConsumesInventoryEvents:
+    action: receive
+    summary: Order продвигает сагу
+    channel:
+      $ref: '#/channels/inventoryEvents'
+    messages:
+      - $ref: '#/channels/inventoryEvents/messages/HoldConfirmed'
+      - $ref: '#/channels/inventoryEvents/messages/HoldConfirmFailed'
+      - $ref: '#/channels/inventoryEvents/messages/HoldReleased'
+      - $ref: '#/channels/inventoryEvents/messages/HoldExpired'
+
+  # ---------- Payment ----------
+  orderSendsPaymentCommands:
+    action: send
+    summary: Order запрашивает возврат (компенсация)
+    channel:
+      $ref: '#/channels/paymentCommands'
+    messages:
+      - $ref: '#/channels/paymentCommands/messages/RefundPayment'
+  paymentHandlesCommands:
+    action: receive
+    summary: Payment делает возврат у провайдера
+    channel:
+      $ref: '#/channels/paymentCommands'
+    messages:
+      - $ref: '#/channels/paymentCommands/messages/RefundPayment'
+  paymentPublishesEvents:
+    action: send
+    summary: Payment сообщает результат оплаты и возврата
+    channel:
+      $ref: '#/channels/paymentEvents'
+    messages:
+      - $ref: '#/channels/paymentEvents/messages/PaymentSucceeded'
+      - $ref: '#/channels/paymentEvents/messages/PaymentFailed'
+      - $ref: '#/channels/paymentEvents/messages/PaymentRefunded'
+  orderConsumesPaymentEvents:
+    action: receive
+    summary: Order продвигает сагу
+    channel:
+      $ref: '#/channels/paymentEvents'
+    messages:
+      - $ref: '#/channels/paymentEvents/messages/PaymentSucceeded'
+      - $ref: '#/channels/paymentEvents/messages/PaymentFailed'
+      - $ref: '#/channels/paymentEvents/messages/PaymentRefunded'
+
+  # ---------- Ticketing ----------
+  orderSendsTicketingCommands:
+    action: send
+    summary: Order просит выпустить билеты
+    channel:
+      $ref: '#/channels/ticketingCommands'
+    messages:
+      - $ref: '#/channels/ticketingCommands/messages/IssueTickets'
+  ticketingHandlesCommands:
+    action: receive
+    summary: Ticketing выпускает билеты (идемпотентно по orderId)
+    channel:
+      $ref: '#/channels/ticketingCommands'
+    messages:
+      - $ref: '#/channels/ticketingCommands/messages/IssueTickets'
+  ticketingPublishesEvents:
+    action: send
+    channel:
+      $ref: '#/channels/ticketingEvents'
+    messages:
+      - $ref: '#/channels/ticketingEvents/messages/TicketsIssued'
+  orderConsumesTicketingEvents:
+    action: receive
+    summary: Order завершает сагу
+    channel:
+      $ref: '#/channels/ticketingEvents'
+    messages:
+      - $ref: '#/channels/ticketingEvents/messages/TicketsIssued'
+
+  # ---------- Order / Notification ----------
+  orderPublishesEvents:
+    action: send
+    summary: Order сообщает итог заказа
+    channel:
+      $ref: '#/channels/orderEvents'
+    messages:
+      - $ref: '#/channels/orderEvents/messages/OrderCompleted'
+      - $ref: '#/channels/orderEvents/messages/OrderCancelled'
+  notificationConsumesOrderEvents:
+    action: receive
+    summary: Notification отправляет письмо покупателю
+    channel:
+      $ref: '#/channels/orderEvents'
+    messages:
+      - $ref: '#/channels/orderEvents/messages/OrderCompleted'
+      - $ref: '#/channels/orderEvents/messages/OrderCancelled'
+
+components:
+  messageTraits:
+    keyedByOrder:
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: orderId
+          bindingVersion: 0.5.0
+
+  messages:
+    EventPublished:
+      name: EventPublished
+      title: Мероприятие опубликовано
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: eventId
+          bindingVersion: 0.5.0
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [eventId, startsAt, seats]
+                properties:
+                  eventId:
+                    type: string
+                    format: uuid
+                  startsAt:
+                    type: string
+                    format: date-time
+                  seats:
+                    type: array
+                    items:
+                      type: object
+                      required: [seatId, price]
+                      properties:
+                        seatId:
+                          type: string
+                        price:
+                          $ref: '#/components/schemas/Money'
+
+    ConfirmHold:
+      name: ConfirmHold
+      title: Подтвердить холд (продать места)
+      summary: HELD → SOLD. Если холд истёк, но места всё ещё свободны — тоже продаём.
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                $ref: '#/components/schemas/HoldRef'
+
+    ReleaseHold:
+      name: ReleaseHold
+      title: Освободить холд (компенсация)
+      summary: HELD → AVAILABLE. Для уже освобождённого или истёкшего холда — no-op с тем же ответом.
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                allOf:
+                  - $ref: '#/components/schemas/HoldRef'
+                  - type: object
+                    required: [reason]
+                    properties:
+                      reason:
+                        type: string
+                        enum: [USER_CANCELLED, PAYMENT_FAILED]
+
+    HoldConfirmed:
+      name: HoldConfirmed
+      title: Места проданы
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                allOf:
+                  - $ref: '#/components/schemas/HoldRef'
+                  - type: object
+                    required: [eventId, seatIds]
+                    properties:
+                      eventId:
+                        type: string
+                        format: uuid
+                      seatIds:
+                        type: array
+                        items:
+                          type: string
+
+    HoldConfirmFailed:
+      name: HoldConfirmFailed
+      title: Не удалось продать места
+      summary: Холд истёк и хотя бы одно место уже захолдил другой заказ.
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                allOf:
+                  - $ref: '#/components/schemas/HoldRef'
+                  - type: object
+                    required: [reason, lostSeatIds]
+                    properties:
+                      reason:
+                        type: string
+                        enum: [SEATS_TAKEN]
+                      lostSeatIds:
+                        type: array
+                        items:
+                          type: string
+
+    HoldReleased:
+      name: HoldReleased
+      title: Холд освобождён по команде
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                $ref: '#/components/schemas/HoldRef'
+
+    HoldExpired:
+      name: HoldExpired
+      title: Холд истёк по таймеру
+      summary: Публикует фоновый джоб Inventory, который раз в 10 секунд освобождает холды с expires_at < now().
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                $ref: '#/components/schemas/HoldRef'
+
+    RefundPayment:
+      name: RefundPayment
+      title: Вернуть деньги (компенсация)
+      summary: Идемпотентно по paymentId — второй возврат того же платежа не создаётся.
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [orderId, paymentId, amount, reason]
+                properties:
+                  orderId:
+                    type: string
+                    format: uuid
+                  paymentId:
+                    type: string
+                    format: uuid
+                  amount:
+                    $ref: '#/components/schemas/Money'
+                  reason:
+                    type: string
+                    enum: [SEATS_LOST, PAID_AFTER_CANCEL]
+
+    PaymentSucceeded:
+      name: PaymentSucceeded
+      title: Оплата прошла
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                $ref: '#/components/schemas/PaymentRef'
+
+    PaymentFailed:
+      name: PaymentFailed
+      title: Оплата не прошла
+      summary: Отказ банка, отмена покупателем или истечение платёжной сессии.
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                allOf:
+                  - $ref: '#/components/schemas/PaymentRef'
+                  - type: object
+                    required: [reason]
+                    properties:
+                      reason:
+                        type: string
+                        enum: [DECLINED, CANCELLED_BY_USER, EXPIRED]
+
+    PaymentRefunded:
+      name: PaymentRefunded
+      title: Деньги возвращены
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                $ref: '#/components/schemas/PaymentRef'
+
+    IssueTickets:
+      name: IssueTickets
+      title: Выпустить билеты
+      summary: Идемпотентно по orderId. Уникальный индекс (event_id, seat_id) не даст выпустить два билета на одно место.
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [orderId, customerId, eventId, seatIds]
+                properties:
+                  orderId:
+                    type: string
+                    format: uuid
+                  customerId:
+                    type: string
+                    format: uuid
+                  eventId:
+                    type: string
+                    format: uuid
+                  seatIds:
+                    type: array
+                    items:
+                      type: string
+
+    TicketsIssued:
+      name: TicketsIssued
+      title: Билеты выпущены
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [orderId, tickets]
+                properties:
+                  orderId:
+                    type: string
+                    format: uuid
+                  tickets:
+                    type: array
+                    items:
+                      type: object
+                      required: [ticketId, seatId]
+                      properties:
+                        ticketId:
+                          type: string
+                          format: uuid
+                        seatId:
+                          type: string
+
+    OrderCompleted:
+      name: OrderCompleted
+      title: Заказ выполнен
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [orderId, customerId, eventId, ticketIds, amount]
+                properties:
+                  orderId:
+                    type: string
+                    format: uuid
+                  customerId:
+                    type: string
+                    format: uuid
+                  eventId:
+                    type: string
+                    format: uuid
+                  ticketIds:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+                  amount:
+                    $ref: '#/components/schemas/Money'
+
+    OrderCancelled:
+      name: OrderCancelled
+      title: Заказ отменён
+      traits:
+        - $ref: '#/components/messageTraits/keyedByOrder'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [orderId, customerId, reason, refunded]
+                properties:
+                  orderId:
+                    type: string
+                    format: uuid
+                  customerId:
+                    type: string
+                    format: uuid
+                  reason:
+                    type: string
+                    enum: [USER_CANCELLED, PAYMENT_FAILED, HOLD_EXPIRED, SEATS_LOST]
+                  refunded:
+                    type: boolean
+                    description: true — деньги были списаны и возвращены
+
+  schemas:
+    Envelope:
+      type: object
+      description: Общая обёртка всех сообщений
+      required: [messageId, type, schemaVersion, occurredAt, correlationId, producer]
+      properties:
+        messageId:
+          type: string
+          format: uuid
+          description: Уникален для сообщения. По нему консьюмер отсеивает дубли (inbox)
+        type:
+          type: string
+          example: PaymentSucceeded
+        schemaVersion:
+          type: integer
+          example: 1
+        occurredAt:
+          type: string
+          format: date-time
+        correlationId:
+          type: string
+          format: uuid
+          description: orderId — связывает все сообщения одной саги
+        causationId:
+          type: string
+          format: uuid
+          description: messageId сообщения, которое вызвало это
+        producer:
+          type: string
+          example: payment-service
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          description: В копейках
+        currency:
+          type: string
+          example: RUB
+    HoldRef:
+      type: object
+      required: [orderId, holdId]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        holdId:
+          type: string
+          format: uuid
+    PaymentRef:
+      type: object
+      required: [orderId, paymentId, amount]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        paymentId:
+          type: string
+          format: uuid
+        amount:
+          $ref: '#/components/schemas/Money'
